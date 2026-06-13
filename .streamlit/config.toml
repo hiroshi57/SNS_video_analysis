@@ -1,0 +1,12 @@
+# アプリのテーマをダークに固定し、環境のライト/ダーク設定に依存させない。
+# これによりサイドバー・本文・ウィジェットの配色が一貫し、文字が読める。
+[theme]
+base = "dark"
+primaryColor = "#818cf8"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1a2030"
+textColor = "#e8eaf0"
+font = "sans serif"
+
+[server]
+headless = true

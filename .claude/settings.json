@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Start-Sleep -Seconds 9; try { $r = Invoke-WebRequest -Uri \"http://localhost:8601\" -UseBasicParsing -TimeoutSec 10; \"HTTP \" + $r.StatusCode } catch { \"ERROR: \" + $_.Exception.Message })",
+      "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-WebRequest -Uri \"http://localhost:8501\" -UseBasicParsing -TimeoutSec 10; \"HTTP \" + $r.StatusCode } catch { \"ERROR: \" + $_.Exception.Message }; Get-Content \"C:\\\\Users\\\\takiz\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-takiz-git-taki57-SNS-video-analysis\\\\4b506a4c-2233-4f43-a0b7-102ec213411d\\\\tasks\\\\bljwntekd.output\" -Tail 5)",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\(r'C:\\\\Users\\\\takiz\\\\git_taki57\\\\SNS_video_analysis\\\\app.py',encoding='utf-8'\\).read\\(\\)\\); print\\('app.py syntax OK'\\)\")",
+      "PowerShell($env:PATH += \";C:\\\\Users\\\\takiz\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Scripts\"; python -m streamlit run app.py --server.port 8501)",
+      "PowerShell(Start-Sleep -Seconds 10; try { $r = Invoke-WebRequest -Uri \"http://localhost:8501\" -UseBasicParsing -TimeoutSec 10; \"HTTP \" + $r.StatusCode } catch { \"ERROR: \" + $_.Exception.Message })",
+      "PowerShell($env:PATH += \";C:\\\\Users\\\\takiz\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Scripts\"; cd C:\\\\Users\\\\takiz\\\\git_taki57\\\\SNS_video_analysis; python -X utf8 _timing.py)",
+      "PowerShell($env:PATH += \";C:\\\\Users\\\\takiz\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Scripts\"; cd C:\\\\Users\\\\takiz\\\\git_taki57\\\\SNS_video_analysis; python -m streamlit run app.py --server.port 8501)",
+      "PowerShell($env:PATH += \";C:\\\\Users\\\\takiz\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Scripts\"; cd C:\\\\Users\\\\takiz\\\\git_taki57\\\\SNS_video_analysis; python -X utf8 _timing2.py)",
+      "PowerShell($conns = Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction SilentlyContinue; if \\($conns\\) { foreach \\($c in $conns\\) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \"PID $\\($c.OwningProcess\\) \\($\\($p.ProcessName\\)\\) still listening on 8501 — stopping\"; Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue } } else { \"8501 is free \\(no leftover process\\)\" })",
+      "PowerShell($env:PATH += \";C:\\\\Users\\\\takiz\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Scripts\"; cd C:\\\\Users\\\\takiz\\\\git_taki57\\\\SNS_video_analysis; Start-Process -FilePath \"python\" -ArgumentList \"-m\",\"streamlit\",\"run\",\"app.py\",\"--server.port\",\"8501\" -WindowStyle Hidden; Start-Sleep -Seconds 12; try { $r = Invoke-WebRequest -Uri \"http://localhost:8501\" -UseBasicParsing -TimeoutSec 10; \"HTTP \" + $r.StatusCode + \" — 起動成功\" } catch { \"ERROR: \" + $_.Exception.Message })",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}
