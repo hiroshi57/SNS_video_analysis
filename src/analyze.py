@@ -117,14 +117,24 @@ def _validate_compare(data: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------- 生成本体
+# リトライしても回復が見込めるエラーのみを対象にする。
+# ClientError(4xx)は原則リトライしない: 認証ミス(401/403)・不正リクエスト(400)は
+# 何度試しても同じだからだ。例外はレート制限(429)で、これは待てば回復する。
 _RETRYABLE = (
-    genai_errors.ServerError,
-    genai_errors.ClientError,
-    json.JSONDecodeError,
-    ValueError,
+    genai_errors.ServerError,   # 5xx: サーバ側の一時障害
+    json.JSONDecodeError,       # モデルがJSON以外を返した(再生成で回復しうる)
+    ValueError,                 # 空応答・検証失敗など
     ConnectionError,
     TimeoutError,
 )
+
+# レート制限のみ ClientError の中でリトライ対象にする。
+_RETRYABLE_CLIENT_CODES = {429}
+
+
+def _is_retryable_client_error(e: genai_errors.ClientError) -> bool:
+    """ClientError のうちレート制限(429)だけリトライ可とする。"""
+    return getattr(e, "code", None) in _RETRYABLE_CLIENT_CODES
 
 
 def _generate(model: str, parts: list, low_res: bool,
@@ -160,6 +170,13 @@ def _generate(model: str, parts: list, low_res: bool,
                 return data
             feedback = "・" + "\n・".join(problems)
             last_error = f"出力検証に失敗: {feedback}"
+        except genai_errors.ClientError as e:
+            if not _is_retryable_client_error(e):
+                # 認証・権限・不正リクエスト等。リトライ無意味なので即中断する。
+                raise AnalysisError(
+                    f"APIリクエストが拒否されました(リトライ不可): {e}"
+                ) from e
+            last_error = f"ClientError(429 レート制限): {e}"
         except _RETRYABLE as e:
             last_error = f"{type(e).__name__}: {e}"
         except genai_errors.APIError as e:  # 想定外のAPIエラー

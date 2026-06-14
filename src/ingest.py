@@ -7,10 +7,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from google.genai import types
@@ -57,6 +59,10 @@ def _ytdlp_info(url: str, download: bool) -> dict:
         "--merge-output-format", "mp4",
         "-o", str(config.VIDEO_CACHE_DIR / "%(id)s.%(ext)s"),
     ]
+    # PATHに無くても見つけられた ffmpeg をyt-dlpに教える(映像+音声の結合に必要)
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg:
+        cmd += ["--ffmpeg-location", ffmpeg]
     if not download:
         cmd.append("--skip-download")
     cmd.append(url)
@@ -66,10 +72,55 @@ def _ytdlp_info(url: str, download: bool) -> dict:
     return json.loads(result.stdout.splitlines()[0])
 
 
+@lru_cache(maxsize=1)
+def _find_ffprobe() -> str | None:
+    """ffprobe の実行パスを探す。PATH → imageio-ffmpeg同梱 の順。
+
+    PATHに無くても、依存に入りがちな imageio-ffmpeg が同梱するバイナリを
+    使えれば尺検出が動く。見つからなければ None(尺検出は諦める)。
+    """
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+    # imageio-ffmpeg は ffmpeg のみ同梱(ffprobeは無い)が、念のため確認する
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        probe = str(Path(exe).with_name(
+            "ffprobe.exe" if exe.lower().endswith(".exe") else "ffprobe"))
+        if Path(probe).exists():
+            return probe
+    except Exception:  # noqa: BLE001 - 任意依存。無ければ無視
+        pass
+    return None
+
+
+@lru_cache(maxsize=1)
+def _find_ffmpeg() -> str | None:
+    """ffmpeg の実行パスを探す。PATH → imageio-ffmpeg同梱 の順。"""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and Path(exe).exists():
+            return exe
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _ffprobe_duration(path: Path) -> float | None:
+    ffprobe = _find_ffprobe()
+    if not ffprobe:
+        return None
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(path)],
+            [ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_format", str(path)],
             capture_output=True, text=True, encoding="utf-8",
         )
         if result.returncode == 0:
