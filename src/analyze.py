@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from typing import Callable
@@ -137,13 +138,50 @@ def _is_retryable_client_error(e: genai_errors.ClientError) -> bool:
     return getattr(e, "code", None) in _RETRYABLE_CLIENT_CODES
 
 
+def _backoff_sleep(transient_attempt: int) -> None:
+    """混雑/一時障害向けの指数バックオフ + ジッタ。最大 ~16 秒。
+
+    ジッタを入れるのは、同時リトライが同じタイミングに集中して
+    再び混雑(503)を踏むのを避けるため。
+    """
+    base = min(2 ** transient_attempt, 16)
+    time.sleep(base + random.uniform(0, 1.0))
+
+
+# 429 応答に含まれるサーバ指定の待ち時間("retryDelay: '34s'" や
+# "Please retry in 34.7s")を秒で取り出す。
+_RETRY_IN_RE = re.compile(r"retry in\s*(\d+(?:\.\d+)?)\s*s", re.I)
+_RETRY_DELAY_RE = re.compile(r"retry[Dd]elay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)\s*s", re.I)
+
+# これを超える待ち指示(=日次上限など長時間枠)は待たずに諦め、明確に案内する。
+_MAX_QUOTA_WAIT_SEC = 60
+# 429 で待って再試行する最大回数。
+_MAX_QUOTA_RETRIES = 3
+
+
+def _retry_after_seconds(e) -> float | None:
+    s = str(e)
+    for rx in (_RETRY_IN_RE, _RETRY_DELAY_RE):
+        m = rx.search(s)
+        if m:
+            return float(m.group(1))
+    return None
+
+
 def _generate(model: str, parts: list, low_res: bool,
               validator: Callable[[dict], list[str]] | None = None,
-              max_attempts: int = 4) -> dict:
+              max_attempts: int = 5,
+              fallback_model: str | None = None) -> dict:
     """JSON生成 + 検証 + リトライ。
 
-    検証関数が問題を返した場合、その指摘を次回プロンプトに添えて再生成する。
-    全試行が失敗したら AnalysisError を送出する(深掘りを必ず完遂させるため)。
+    設計方針:
+    - 検証失敗(中身の不備)は待たずに即再生成する。指摘を次回プロンプトに添える。
+      → 待ち時間を入れていた従来比で、品質リトライが大幅に速くなる。
+    - 5xx/503(モデル混雑)・429・通信エラーは「一時障害」とみなし、指数バックオフ
+      + ジッタで待ってから再試行する(検証回数は消費しない)。
+    - 503 が続く場合は、より空いている `fallback_model`(通常 flash)へ自動で切替え、
+      「混雑で完遂できない」を回避する。
+    - 認証・不正リクエスト等(429以外の4xx)は即中断する(リトライ無意味)。
     """
     cfg = types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -151,9 +189,14 @@ def _generate(model: str, parts: list, low_res: bool,
             types.MediaResolution.MEDIA_RESOLUTION_LOW if low_res else None
         ),
     )
+    current_model = model
     last_error = ""
     feedback = ""
-    for attempt in range(1, max_attempts + 1):
+    transient_streak = 0          # 連続した一時障害(混雑等)の回数
+    validation_attempts = 0       # 検証で弾かれた回数(これだけ max_attempts で打ち切る)
+    quota_waits = 0               # 429(クォータ/レート上限)で待った回数
+
+    while validation_attempts < max_attempts:
         call_parts = list(parts)
         if feedback:
             call_parts.append(
@@ -162,31 +205,66 @@ def _generate(model: str, parts: list, low_res: bool,
             )
         try:
             response = get_client().models.generate_content(
-                model=model, contents=call_parts, config=cfg
+                model=current_model, contents=call_parts, config=cfg
             )
             data = _parse_json(response.text)
             problems = validator(data) if validator else []
             if not problems:
                 return data
+            # --- 中身の不備: 待たずに即リトライ(指摘をフィードバック) ---
+            validation_attempts += 1
+            transient_streak = 0
             feedback = "・" + "\n・".join(problems)
             last_error = f"出力検証に失敗: {feedback}"
+            continue
         except genai_errors.ClientError as e:
             if not _is_retryable_client_error(e):
                 # 認証・権限・不正リクエスト等。リトライ無意味なので即中断する。
                 raise AnalysisError(
                     f"APIリクエストが拒否されました(リトライ不可): {e}"
                 ) from e
-            last_error = f"ClientError(429 レート制限): {e}"
-        except _RETRYABLE as e:
+            # --- 429: クォータ/レート上限。サーバ指定の待ち時間を尊重する ---
+            quota_waits += 1
+            wait = _retry_after_seconds(e)
+            # 待ち指示が長すぎる(=日次上限など)・回数超過なら、待たずに明確に案内する。
+            if quota_waits > _MAX_QUOTA_RETRIES or (
+                    wait is not None and wait > _MAX_QUOTA_WAIT_SEC):
+                raise AnalysisError(
+                    "APIの利用上限(429: クォータ超過)に達しました。"
+                    "無料枠の1日あたりリクエスト数を使い切った可能性があります。"
+                    "しばらく時間をおくか、Google AI Studio で課金を有効化して"
+                    "上限を引き上げてください。"
+                    + (f" 約{wait:.0f}秒後に再試行可能との応答です。"
+                       if wait is not None else "")
+                ) from e
+            # サーバ指定があればその時間(+少し)待つ。無ければ控えめな指数待ち。
+            sleep_for = (wait + 1.5) if wait is not None \
+                else min(2 ** quota_waits, 16) + 1.0
+            last_error = (f"429 レート/クォータ上限。サーバ指定に従い "
+                          f"{sleep_for:.0f}秒待機して再試行")
+            time.sleep(sleep_for)
+            continue  # 一時障害カウンタは消費しない
+        except genai_errors.ServerError as e:
+            # 503/5xx = モデル混雑・一時障害。待って再試行し、続くならモデルを切替える。
+            last_error = f"ServerError({getattr(e, 'code', '5xx')} 混雑/一時障害): {e}"
+            if (fallback_model and current_model != fallback_model
+                    and transient_streak >= 1):
+                current_model = fallback_model
+                last_error += f" → モデルを {fallback_model} に切替えて再試行"
+        except (json.JSONDecodeError, ValueError, ConnectionError,
+                TimeoutError) as e:
             last_error = f"{type(e).__name__}: {e}"
         except genai_errors.APIError as e:  # 想定外のAPIエラー
             last_error = f"APIError: {e}"
-        if attempt < max_attempts:
-            time.sleep(min(2 ** attempt, 12))  # 指数バックオフ(最大12秒)
+
+        # ここに来たら一時障害。バックオフして再試行(検証回数は消費しない)。
+        transient_streak += 1
+        if transient_streak > max_attempts + 3:
+            break  # 一時障害が延々続く場合の安全弁
+        _backoff_sleep(transient_streak)
 
     raise AnalysisError(
-        f"{max_attempts}回試行しましたが分析を完遂できませんでした。"
-        f"最後のエラー: {last_error}"
+        f"分析を完遂できませんでした。最後のエラー: {last_error}"
     )
 
 
@@ -213,12 +291,15 @@ def _analyze_segmented(vs: VideoSource, prompt_file: str, model: str,
     """セグメントごとに分析し、複数セグメントなら結果をマージする。
 
     sub_progress(fraction, detail) を渡すと区間進捗を通知する。
+    混雑時は flash へフォールバックして完遂率を上げる。
     """
     client = get_client()
     prompt = _load_prompt(prompt_file)
     segs = _segments(vs.duration_sec)
     low_res = _is_low_res(vs)
     n = len(segs)
+    # 指定モデルが flash 以外(=pro等)なら、混雑時に flash へ退避できる。
+    fallback = config.MODEL_FAST if model != config.MODEL_FAST else None
 
     results = []
     for i, (start, end) in enumerate(segs):
@@ -233,7 +314,8 @@ def _analyze_segmented(vs: VideoSource, prompt_file: str, model: str,
                 f"\n\n※これは長時間動画の {int(start // 60)}分〜{int(end // 60)}分 の"
                 "区間です。タイムスタンプは動画全体の実時刻で記載してください。"
             )
-        results.append(_generate(model, [part, seg_prompt], low_res, validator))
+        results.append(_generate(model, [part, seg_prompt], low_res, validator,
+                                 fallback_model=fallback))
         if sub_progress:
             sub_progress((i + 1) / n, f"区間 {i + 1}/{n} 完了" if n > 1 else "")
 
@@ -249,7 +331,9 @@ def _analyze_segmented(vs: VideoSource, prompt_file: str, model: str,
         + json.dumps(results, ensure_ascii=False)
     )
     # マージ結果も検証する(統合で必須項目が落ちないことを保証)
-    return _generate(config.MODEL_DEEP, [merge_prompt], False, validator)
+    return _generate(config.MODEL_DEEP, [merge_prompt], False, validator,
+                     fallback_model=config.MODEL_FAST
+                     if config.MODEL_DEEP != config.MODEL_FAST else None)
 
 
 def is_fast_mode(vs: VideoSource) -> bool:
@@ -294,4 +378,7 @@ def run_compare(new_analysis: dict, past_analyses: list[dict]) -> dict:
         else "過去の分析が0件",
     }
     contents = [prompt + "\n\n" + json.dumps(payload, ensure_ascii=False)]
-    return _generate(config.MODEL_DEEP, contents, False, _validate_compare)
+    # 比較は映像を送らないテキスト処理なので、混雑時は flash でも十分こなせる。
+    return _generate(config.MODEL_DEEP, contents, False, _validate_compare,
+                     fallback_model=config.MODEL_FAST
+                     if config.MODEL_DEEP != config.MODEL_FAST else None)

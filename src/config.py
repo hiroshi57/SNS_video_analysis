@@ -4,8 +4,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # SNS_video_analysis/
+# override=True: .env を設定の正典にする。これがないと、シェルやOSに残った
+# 古い GEMINI_API_KEY 等のシステム環境変数が .env より優先され、
+# 無効キーで「API key not valid(400)」になる事故が起きる。
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
